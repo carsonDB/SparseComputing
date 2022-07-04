@@ -1,0 +1,5 @@
+{
+    "makefile.extensionOutputFolder": "./.vscode",
+    "cmake.configureOnOpen": false,
+    "git.ignoreLimitWarning": true
+}
