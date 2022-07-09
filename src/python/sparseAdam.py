@@ -1,5 +1,7 @@
 from typing import Optional, List, Tuple, Union
 import torch
+from torch import Tensor
+from .sparseTypes import SparseTensor
 
 
 class SparseAdam(torch.optim.SparseAdam):

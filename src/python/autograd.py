@@ -53,6 +53,8 @@ class SparseFunction():
         # out_tensors all become requires_grad == True if at least one of in_tensors requires_grad == True
         out_tensors = [t for t in outList if isinstance(t, (Tensor, spt.SparseTensor))] \
             if len(in_tensors) > 0 else []
+        
+        assert len(in_tensors) > 0, 'inputs should contain at least 1 tensor/sparseTensor, requires_grad = True'
         assert len(out_tensors) == 1, 'currently only support output 1 tensor'
         out_tensor = out_tensors[0]
         # assign current function node to outputs, for further functions.

@@ -18,7 +18,7 @@ torch::Tensor sparseDenseMM_forward(SparseTensor& input, torch::Tensor& weight) 
     auto in_channels = weight.size(1);
     auto output = torch::zeros({batch_size, out_channels}, torch::dtype(torch::kF32));
     auto in_id_ptr = input.indices().contiguous().data_ptr<int64_t>();
-    auto in_val_ptr = input.values().contiguous().data_ptr<float>();
+    auto in_val_ptr = input.c_values_ptr<float>();
     auto weight_ptr = weight.contiguous().data_ptr<float>();
     auto out_ptr = output.data_ptr<float>();
     
@@ -55,7 +55,7 @@ SparseTensor sparseDenseMM_backward(SparseTensor& input, torch::Tensor& grad) {
     auto in_width = input.indices().size(3);
     auto out_channels = grad.size(1);
     auto in_id_ptr = input.indices().contiguous().data_ptr<int64_t>();
-    auto in_val_ptr = input.values().contiguous().data_ptr<float>();
+    auto in_val_ptr = input.c_values_ptr<float>();
     auto grad_ptr = grad.contiguous().data_ptr<float>();
     // find sub_in_channels
     unordered_set<int64_t> id_set;
@@ -108,7 +108,7 @@ torch::Tensor sparseDenseMM_backward_coo(SparseTensor& input, torch::Tensor& gra
     auto out_channels = grad.size(1);
     auto in_channels = input.range() * in_height * in_width;
     auto in_id_ptr = input.indices().contiguous().data_ptr<int64_t>();
-    auto in_val_ptr = input.values().contiguous().data_ptr<float>();
+    auto in_val_ptr = input.c_values_ptr<float>();
     auto grad_ptr = grad.contiguous().data_ptr<float>();
     // find sub_in_channels
     unordered_set<int64_t> id_set;

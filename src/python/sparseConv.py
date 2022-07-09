@@ -46,10 +46,13 @@ class SparseConv2d(nn.Module):
         out_channels: int,
         kernel_size: size_2_t, 
         stride: size_2_t = 1, 
-        padding: size_2_t = 0
+        padding: size_2_t = 0,
         # no bias currently
+        device=None,
+        dtype=None
     ) -> None:        
         super().__init__()
+        factory_kwargs = {'device': device, 'dtype': dtype}
         self.in_connects = in_connects
         # normalize stride / padding
         self.kernel_size = norm_tuple(kernel_size, 2)
@@ -57,7 +60,7 @@ class SparseConv2d(nn.Module):
         self.padding = norm_tuple(padding, 2)
         # create empty sparse weight
         indices = torch.zeros([out_channels, in_connects], dtype=torch.int64)
-        values = torch.zeros([out_channels, in_connects, *self.kernel_size], dtype=torch.float)
+        values = torch.zeros([out_channels, in_connects, *self.kernel_size], **factory_kwargs)
         weightTensor = SparseTensor.create(indices, values, sparse_dim=1, range=in_channels, requires_grad=True)
         self.weight = SparseParameter(weightTensor)
         # self.bias = nn.Parameter(Tensor(1, 3 * state_size))

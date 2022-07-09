@@ -11,7 +11,7 @@ from .autograd import SparseFunction
 
 
 class SparseBatchNorm2dFunction(SparseFunction):
-    """ Refer to: https://kratzert.github.io/2016/02/12/understanding-the-gradient-flow-through-the-batch-normalization-layer.html
+    """ Refer to: https://towardsdatascience.com/implementing-batch-normalization-in-python-a044b0369567
         temporarily not consider learnable variables beta/gamma
     """
     @staticmethod
@@ -29,13 +29,13 @@ class SparseBatchNorm2dFunction(SparseFunction):
         if is_training:
             count = input.count_nonzero(dim, True)
             mean = input.sum(dim, True) / count # count is zeros???
-            xmu = input - mean
-            sq = xmu ** 2
-            var = sq.sum(dim, True) / count
-            sqrtvar = (var + eps).sqrt()
-            ctx.save_for_backward(xmu, sqrtvar, count)
+            x_centered = input - mean
+            var = (x_centered ** 2).sum(dim, True) / count
+            std = (var + eps).sqrt()
+            x_norm = x_centered / std
         # norm
-        output = xmu / sqrtvar
+        x_norm = x_centered / std
+        ctx.save_for_backward(x_centered, x_norm, std, count)
         # update running_... if training
         if is_training:
             mean = mean.squeeze([0, 2, 3])
@@ -45,18 +45,17 @@ class SparseBatchNorm2dFunction(SparseFunction):
             var.mask_on_dense(running_var).add_to_dense(running_var, alpha=-exponential_average_factor)
             var.add_to_dense(running_var, alpha=exponential_average_factor)
         
-        return output
+        return x_norm
 
     @staticmethod
     def backward(ctx, grad: SparseTensor):
-        xmu, sqrtvar, count = ctx.saved_tensors
-        divar = (grad * xmu).sum([0, 2, 3], True)
-        dxmu1 = grad / sqrtvar
-        dxmu2 = xmu * -1 / count / (sqrtvar**3 * divar)
-        dx1 = (dxmu1 + dxmu2)
-        dmu = -1 * dx1.sum([0, 2, 3], keepdim=True)
-        dx2 = dmu / count
-        d_input = dx1 + dx2
+        dim = [0, 2, 3]
+        x_centered, x_norm, std, count = ctx.saved_tensors
+        d_input = 1. / count / std * (
+            count * grad - 
+            grad.sum(dim, keepdim=True) - 
+            x_norm * (grad * x_norm).sum(dim, keepdim=True))
+        
         return d_input, None, None, None, None, None
 
 
@@ -68,9 +67,12 @@ class SparseBatchNorm2d(nn.BatchNorm2d):
         momentum=0.1,
         # affine=True, # not implemented
         track_running_stats=True,
+        device=None,
+        dtype=None
     ):
+        factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__(num_features, eps=eps, momentum=momentum, affine=False, 
-            track_running_stats=track_running_stats)
+            track_running_stats=track_running_stats, **factory_kwargs)
 
     def forward(self, input: SparseTensor) -> SparseTensor:
         exponential_average_factor = self.momentum if self.momentum is not None else 0.0

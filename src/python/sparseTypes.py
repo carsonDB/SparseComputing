@@ -40,6 +40,9 @@ class SparseTensor(object):
 
     def range(self):
         return self.cTensor.range()
+    
+    def coalesce(self):
+        return SparseTensor(self.cTensor.coalesce())
 
     def init_rand_indices(self):
         self.cTensor.init_rand_indices()
@@ -86,6 +89,8 @@ class SparseTensor(object):
         :param k select topk along dim
         :return only contain sparse_shape
         """
+        if isinstance(dense_tensor, (list, tuple, int, float)):
+            dense_tensor = torch.tensor(dense_tensor)
         assert (not dense_tensor.is_sparse), "Tensor must be a strided (dense) tensor"
         vals, ids = dense_tensor.topk(k, sparse_dim, True, False)
         return cls.create(ids, vals, sparse_dim, dense_tensor.shape[sparse_dim])
@@ -111,29 +116,29 @@ class SparseTensor(object):
         out_shape = list(vals.shape)
         out_shape[self.sparse_dim()] = self.range()
         out = torch.zeros(*out_shape, dtype=vals.dtype)
-        out.scatter_(self.sparse_dim(), ids, vals.abs())
-        return (out > 0).to(torch.float)
+        out.scatter_add_(self.sparse_dim(), ids, vals.abs())
+        return (out > 0).to(self.dtype)
 
-    @classmethod
-    def from_fake_coo_tensor(cls, input: Tensor):
-        assert input.layout == torch.sparse_coo
-        info = input.restricted_info
-        ids = input._indices().view(info['indices_size'])
-        vals = input._values().view(info['values_size'])
-        return cls.create(ids, vals, info['sparse_dim'], info['range'])
+    # @classmethod
+    # def from_fake_coo_tensor(cls, input: Tensor):
+    #     assert input.layout == torch.sparse_coo
+    #     info = input.restricted_info
+    #     ids = input._indices().view(info['indices_size'])
+    #     vals = input._values().view(info['values_size'])
+    #     return cls.create(ids, vals, info['sparse_dim'], info['range'])
 
-    def to_fake_coo_tensor(self):
-        ids = self.indices().view(-1)[None, :]
-        vals = self.values().view(*ids.shape[1:], -1)
-        out = torch.sparse_coo_tensor(ids, vals)
-        out.coalesce = lambda: {} # forbidden resort
-        out.restricted_info = {
-            'indices_size': self.indices().shape, 
-            'values_size': self.values().shape, 
-            'range': self.range(), 
-            'sparse_dim': self.sparse_dim()
-        }
-        return out
+    # def to_fake_coo_tensor(self):
+    #     ids = self.indices().view(-1)[None, :]
+    #     vals = self.values().view(*ids.shape[1:], -1)
+    #     out = torch.sparse_coo_tensor(ids, vals)
+    #     out.coalesce = lambda: {} # forbidden resort
+    #     out.restricted_info = {
+    #         'indices_size': self.indices().shape, 
+    #         'values_size': self.values().shape, 
+    #         'range': self.range(), 
+    #         'sparse_dim': self.sparse_dim()
+    #     }
+    #     return out
 
     def to_coo_tensor(self):
         raise NotImplementedError
@@ -152,6 +157,10 @@ class SparseTensor(object):
     @property
     def shape(self):
         return self.size()
+
+    @property
+    def dtype(self):
+        return self.values().dtype
 
     def __repr__(self):
         return "{}(indices={}, value={}, size={}, requires_grad={})" \
@@ -197,6 +206,14 @@ class SparseTensor(object):
 
     def __truediv__(self, other):
         return elementwise_ops(self, other, 'div')
+
+    def __rtruediv__(self, prev):
+        mask = (self.values() != 0).to(self.dtype) # inf -> nan when div by 0
+        if isinstance(prev, (int, float)):
+            vals = (prev / self.values()) * mask
+            vals[vals != vals] = 0 # nan -> 0. when div by 0
+            return self.update_with(values=vals)
+        raise NotImplementedError
     
     def div_(self, other):
         return elementwise_ops(self, other, 'div', inplace=True)
@@ -234,7 +251,6 @@ class SparseTensor(object):
         return self.update_with(indices=self.indices().clone(), values=self.values().clone())
             
 
-
 def reduce_ops(
     input: SparseTensor,
     dim: size_n_t_none,
@@ -266,10 +282,11 @@ def elementwise_ops(
         return SparseTensor(cTensor)
     elif isinstance(other, (float, int)):
         suffix = '_' if inplace else ''
-        values = getattr(torch, op + suffix)(input.values(), other)
+        mask = (input.values() != 0.).to(input.dtype)
+        values = getattr(torch, op + suffix)(input.values(), other) * mask
         return input if inplace else input.update_with(values=values)
     elif isinstance(other, Tensor) and other.is_sparse:
-        assert other.layout == torch.sparse_coo, 'not Implemented yet'
+        assert other.layout == torch.sparse_coo, 'not Implemented yet' # todo... have implemented ???
         assert hasattr(spCpp, 'elementwise_' + op), 'not Implemented yet'
         cTensor = getattr(spCpp, 'elementwise_' + op)(input.cTensor, other, inplace)
         return input if inplace else SparseTensor(cTensor)

@@ -8,7 +8,7 @@ inline int conv_length(int length, int kernel, int padding, int stride, int dila
 }
 
 /**
- * support both LongInt / Float type
+ * support both LongInt / Float / double type
  * Refer:
  * https://github.com/pytorch/pytorch/blob/v1.11.0/aten/src/ATen/native/Im2Col.cpp#L14
  * https://github.com/pytorch/pytorch/blob/v1.11.0/aten/src/ATen/native/im2col.h#L14
@@ -70,12 +70,14 @@ torch::Tensor unfold(const torch::Tensor& input, size_hw kernel, size_hw padding
  * @return indices/values: [batch, sub_channels, height, width]
  *  {output, unfold_cols}
  */
-vector<SparseTensor> sparseConv2d_forward(
+template<typename T>
+vector<SparseTensor> sparseConv2d_forward_template(
     SparseTensor& input,
     SparseTensor& weight,
     vector<int64_t> stride,
     vector<int64_t> padding
 ) {
+    TORCH_CHECK(input.dtype() == weight.dtype()); // only use input.dtype for out.dtype
     TORCH_CHECK(input.indices().dim() == 4, "input.indices should be dim = 4");
     TORCH_CHECK(input.values().dim() == 4, "input.values should be dim = 4");
     TORCH_CHECK(weight.indices().dim() == 2, "weight.indices should be dim = 2");
@@ -93,16 +95,16 @@ vector<SparseTensor> sparseConv2d_forward(
     auto out_channels = weight._size(0);
     auto in_connects = weight._size(1);
     // make sure contiguous, then use pointer
-    auto weight_vPtr = weight.c_values_ptr();
+    auto weight_vPtr = weight.values().contiguous().data_ptr<T>();
 
     // ..._blocks [batch, sub_channels*k_h*k_w, blocks]
     auto indices_blocks = unfold<int64_t>(input.indices(), kernel, padding, stride, dilation);
-    auto values_blocks = unfold<float>(input.values(), kernel, padding, stride, dilation);
+    auto values_blocks = unfold<T>(input.values(), kernel, padding, stride, dilation);
     auto block_channels = indices_blocks.size(1);
     auto n_blocks = indices_blocks.size(2);
     // make sure contiguous, then use pointer
     auto indices_bPtr = indices_blocks.contiguous().data_ptr<int64_t>();
-    auto values_bPtr = values_blocks.contiguous().data_ptr<float>();
+    auto values_bPtr = values_blocks.contiguous().template data_ptr<T>();
     
     // calculate longest sub_channels of output
     int max_channels = 0;
@@ -127,7 +129,9 @@ vector<SparseTensor> sparseConv2d_forward(
     // auto end = high_resolution_clock::now();
     // cout << "(elapse): " << duration_cast<milliseconds>(end - start).count() << " ms" << endl;
 
-    auto out = create_sparse_IdVal({batch_size, max_channels, out_height, out_width});
+    auto out = create_sparse_IdVal_options<T>(
+        {batch_size, max_channels, out_height, out_width}, 
+        input.values().options());
     
     // sparse matmul (determined by input)
     at::parallel_for(0, batch_size, 0, [&](int64_t start, int64_t end) {
@@ -135,7 +139,7 @@ vector<SparseTensor> sparseConv2d_forward(
             for (const auto bk : c10::irange(n_blocks)) { // block
                 
                 // dotproduct each block with all related weight neurons.
-                unordered_map<int64_t, float> out_map; // out_channel_id -> value
+                unordered_map<int64_t, T> out_map; // out_channel_id -> value
                 for (const auto ch : c10::irange(block_channels)) { // channel
                     auto ptr = (bt * block_channels + ch) * n_blocks + bk;
                     // auto ptr = (bt * n_blocks + bk) * block_channels + ch;
@@ -168,6 +172,11 @@ vector<SparseTensor> sparseConv2d_forward(
     };
 }
 
+template vector<SparseTensor> sparseConv2d_forward_template<float>(
+    SparseTensor& input, SparseTensor& weight, vector<int64_t> stride, vector<int64_t> padding);
+template vector<SparseTensor> sparseConv2d_forward_template<double>(
+    SparseTensor& input, SparseTensor& weight, vector<int64_t> stride, vector<int64_t> padding);
+
 
 /**
  * @param grad [batch, sub_out_channels, out_height, out_width]
@@ -176,11 +185,13 @@ vector<SparseTensor> sparseConv2d_forward(
  * @param kernel [int, int]
  * @return SparseConv2dWeightGrad: sizes=[out_channels, in_channels, kernel_h, kernel_w]
  */
-torch::Tensor sparseConv2d_backward(
+template<typename T>
+torch::Tensor sparseConv2d_backward_template(
     SparseTensor& grad, 
     SparseTensor& unfolded_inputs,
     vector<int64_t>& kernel
 ) {
+    TORCH_CHECK(grad.dtype() == unfolded_inputs.dtype());
     auto grad_shape = grad.indices().sizes().vec();
     auto out_height = grad_shape[2];
     auto out_width = grad_shape[3];
@@ -189,11 +200,11 @@ torch::Tensor sparseConv2d_backward(
     auto in_channels_range = unfolded_inputs.range();
     vector<int64_t> out_size = {grad.range(), in_channels_range, kernel[0], kernel[1]};
     auto grad_id_ptr = grad.c_indices_ptr();
-    auto grad_val_ptr = grad.c_values_ptr();
+    auto grad_val_ptr = grad.values().contiguous().data_ptr<T>();
     auto input_id_ptr = unfolded_inputs.c_indices_ptr();
-    auto input_val_ptr = unfolded_inputs.c_values_ptr();
+    auto input_val_ptr = unfolded_inputs.values().contiguous().data_ptr<T>();
 
-    unordered_map<int64_t, float> out_map;
+    unordered_map<int64_t, T> out_map;
     // be careful about the parallel, since they use the same unordered_map
     sizes_for(grad_shape, false, [&](vector<int64_t> locals, const int64_t i) {
         auto b_i = locals[0];
@@ -216,7 +227,7 @@ torch::Tensor sparseConv2d_backward(
 
     int nse = out_map.size();
 
-    auto out = create_sparse_IdVal({4, nse}, {nse});
+    auto out = create_sparse_IdVal_options<T>({4, nse}, {nse}, grad.values().options());
     int nse_i = 0;
     vector<int64_t> locals(4, 0);
     for (const auto& item : out_map) {
@@ -228,5 +239,12 @@ torch::Tensor sparseConv2d_backward(
         nse_i++;
     }
 
-    return torch::sparse_coo_tensor(out.indices, out.values, out_size, torch::dtype(torch::kF32));
+    return torch::sparse_coo_tensor(
+        out.indices, out.values, out_size, grad.values().options().layout(torch::kSparse));
 }
+
+template torch::Tensor sparseConv2d_backward_template<float>(
+    SparseTensor& grad, SparseTensor& unfolded_inputs, vector<int64_t>& kernel);
+template torch::Tensor sparseConv2d_backward_template<double>(
+    SparseTensor& grad, SparseTensor& unfolded_inputs, vector<int64_t>& kernel);
+

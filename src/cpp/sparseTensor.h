@@ -22,15 +22,18 @@ class SparseTensor {
 
 public:
     SparseTensor(torch::Tensor& indices, torch::Tensor& values, int64_t sparse_dim, int64_t range) {
-        // check indices is prefix of values
+        // check indices is prefix of values...
         TORCH_CHECK(indices.min().item<int64_t>() >= 0 && indices.max().item<int64_t>() < range);
         TORCH_CHECK(sparse_dim < indices.dim(), "sparse_dim exceeds indices.dim()");
+        TORCH_CHECK(values.dtype() == torch::kF32 || values.dtype() == torch::kF64, 
+                "scalar type must either be float or double");
         _indices = indices;
         _values = values;
         _sparse_dim = sparse_dim;
         _range = range;
     }
-    void coalesce();
+    auto dtype() { return _values.dtype(); }
+    SparseTensor coalesce();
     void init_rand_indices() {
         // TORCH_CHECK(!replace, "replace=true not implemented.");
         TORCH_CHECK(_indices.dim() == 2, "only support dim=2.");
@@ -60,11 +63,23 @@ public:
             out.c_set_id2offset_map(id2offset_map);
         return out;
     }
-    
+
+// c++ only
     vector<int64_t>& c_id2offset(int64_t in) { return id2offset_map[in]; }
     void c_set_id2offset_map(Id2OffsetMap map) { id2offset_map = map; }
     int64_t* c_indices_ptr() const { return _indices.contiguous().data_ptr<int64_t>(); }
-    float* c_values_ptr() const { return _values.contiguous().data_ptr<float>(); }
+    template<typename T> T* c_values_ptr() const { return _values.contiguous().data_ptr<T>(); }
 };
+
+
+template<typename T>
+SparseTensor coalesce_template(SparseTensor& input);
+
+inline SparseTensor SparseTensor::coalesce() {
+    return (dtype() == torch::kF32) ?
+        coalesce_template<float>(*this) :
+        coalesce_template<double>(*this);
+}
+
 
 #endif

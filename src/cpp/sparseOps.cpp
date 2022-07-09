@@ -1,7 +1,7 @@
 #include "sparseOps.h"
 
 
-/**
+/** Deprecated
  * @param input e.g. [batch, channel(sparse), height, width]
  * (not considered) @param dim must dim != sparse_dim. Otherwise, just use dense way in python .
  */
@@ -10,8 +10,8 @@ vector<SparseTensor> sparse_batchMeanVar(SparseTensor& input) {
     TORCH_CHECK(input.indices().dim() == 4 && input.values().dim() == 4);
     // todo...
     auto numel = input.indices().numel();
-    auto indice_ptr = input.indices().contiguous().data_ptr<int64_t>();
-    auto value_ptr = input.values().contiguous().data_ptr<float>();
+    auto indice_ptr = input.c_indices_ptr();
+    auto value_ptr = input.c_values_ptr<float>();
     unordered_map<int64_t, normStats> out_map; // id (sparse) -> normStats
     for (const auto i : c10::irange(numel)) {
         auto id = indice_ptr[i];
@@ -54,16 +54,17 @@ vector<SparseTensor> sparse_batchMeanVar(SparseTensor& input) {
  * reduce axis should not include sparse_dim. Otherwise, use normal dense tensor way.
  * @param axis need to be reduced
  */
+template<typename T>
 SparseTensor sparse_reduce_template(
     const SparseTensor& input, 
     const set<int64_t> axis, 
     const bool keepdim,
-    const templateFn& f
+    const templateFn<T>& f
 ) {
     TORCH_CHECK(axis.count(input.sparse_dim()) == 0, "axis should not include sparse_dim");
     TORCH_CHECK(input.indices().dim() == input.values().dim(), "only support value=Scalar yet");
     const auto in_id_ptr = input.c_indices_ptr();
-    const auto in_val_ptr = input.c_values_ptr();
+    const auto in_val_ptr = input.values().contiguous().data_ptr<T>();
     const auto input_shape = input.indices().sizes().vec();
 
     vector<int64_t> rest_sizes; // rest sizes without sparse dim
@@ -117,7 +118,7 @@ SparseTensor sparse_reduce_template(
         else if (keepdim)
             out_shape.push_back(1);
     }
-    auto out = create_sparse_IdVal(out_shape);
+    auto out = create_sparse_IdVal_options<T>(out_shape, input.values().options());
     
     sizes_for(rest_sizes, true, [&](vector<int64_t>& locals1, int64_t global) {
         unordered_map<int64_t, int64_t> id2offset; // sparse id -> offset of sparse dim of output
@@ -150,14 +151,21 @@ SparseTensor sparse_reduce_template(
     return SparseTensor(out.indices, out.values, out_sparse_dim, input.range());
 }
 
+template SparseTensor sparse_reduce_template<float>(
+    const SparseTensor& input, const set<int64_t> axis, const bool keepdim, const templateFn<float>& f);
+template SparseTensor sparse_reduce_template<double>(
+    const SparseTensor& input, const set<int64_t> axis, const bool keepdim, const templateFn<double>& f);
+
 
 /**
  * currently, union of two inputs at sparse_dim.
  * Broadcast rules follow: https://pytorch.org/docs/stable/notes/broadcasting.html
- * @param f (float, float) -> float, operation of each pair.
+ * @param f (float/double, float/double) -> float/double, operation of each pair.
  */
-SparseTensor sparse_elementwise_template(SparseTensor& input1, SparseTensor& input2, const templateFn& f) {
+template<typename T>
+SparseTensor sparse_elementwise_template(SparseTensor& input1, SparseTensor& input2, const templateFn<T>& f) {
     TORCH_CHECK(input1.range() == input2.range());
+    TORCH_CHECK(input1.dtype() == input2.dtype());
     auto shape1 = input1.indices().sizes().vec();
     auto shape2 = input2.indices().sizes().vec();
     auto sparse_dim1 = input1.sparse_dim();
@@ -165,15 +173,16 @@ SparseTensor sparse_elementwise_template(SparseTensor& input1, SparseTensor& inp
     TORCH_CHECK(shape1.size() - sparse_dim1 == shape2.size() - sparse_dim2); // align from tailling
     int64_t sparse_dim_from_tailing = shape1.size() - sparse_dim1 - 1;
     auto in_id_ptr1 = input1.c_indices_ptr();
-    auto in_val_ptr1 = input1.c_values_ptr();
+    auto in_val_ptr1 = input1.values().contiguous().data_ptr<T>();
     auto in_id_ptr2 = input2.c_indices_ptr();
-    auto in_val_ptr2 = input2.c_values_ptr();
+    auto in_val_ptr2 = input2.values().contiguous().data_ptr<T>();
     int sparse_size1 = input1._size(sparse_dim1);
     int sparse_size2 = input2._size(sparse_dim2);
     // find out related shapes
     int out_dims = max(shape1.size(), shape2.size());
     int out_sparse_dim = out_dims - sparse_dim_from_tailing - 1;
     auto unrelated_shape = vector<int64_t>(out_dims, 0); // unrelated_shape[sparse_dim] = 1
+    bool input1_broadcast = false, input2_broadcast = false;
     // tl (tail): start from end
     for (const auto tl : c10::irange(out_dims)) {
         if (tl == sparse_dim_from_tailing) {
@@ -185,7 +194,10 @@ SparseTensor sparse_elementwise_template(SparseTensor& input1, SparseTensor& inp
         auto size2 = (int)shape2.size() >= tl + 1 ? shape2[shape2.size() - tl - 1] : 1;
         TORCH_CHECK(size1 == size2 || size1 == 1 || size2 == 1, 
             "same or either size is 1 or 0, but " + to_string(size1) + " and " + to_string(size2));
-        unrelated_shape[out_dims - tl - 1] = max(size1, size2);
+        auto max_size = max(size1, size2);
+        unrelated_shape[out_dims - tl - 1] = max_size;
+        max_size > size1 && (input1_broadcast = true);
+        max_size > size2 && (input2_broadcast = true);
     }
     // find max_sparse_size
     int64_t out_sparse_size = 0;
@@ -204,14 +216,19 @@ SparseTensor sparse_elementwise_template(SparseTensor& input1, SparseTensor& inp
         }
         out_sparse_size = max(out_sparse_size, (int64_t)id_set.size());
     });
+    // skip when one is 0, another one is broadcast.
+    const templateFn<T>& broadcast_f = [&f, &input1_broadcast, &input2_broadcast](auto a, auto b) {
+        if ((a == 0 && input2_broadcast) || (b == 0 && input1_broadcast)) return static_cast<T>(0);
+        return f(a, b);
+    };
     // init out tensor
     vector<int64_t> out_shape = unrelated_shape;
     out_shape[out_sparse_dim] = out_sparse_size;
-    auto out = create_sparse_IdVal(out_shape);
+    auto out = create_sparse_IdVal_options<T>(out_shape, input1.values().options());
     // elementwise operation
     sizes_for(unrelated_shape, true, [&](vector<int64_t> ids, int64_t global) {
         // already ids[out_sparse_dim] = 0
-        unordered_map<int64_t, float> out_map;
+        unordered_map<int64_t, T> out_map;
         unordered_set<int64_t> out_set;
         for (const auto i : c10::irange(sparse_size1)) {
             ids[out_sparse_dim] = i;
@@ -226,12 +243,12 @@ SparseTensor sparse_elementwise_template(SparseTensor& input1, SparseTensor& inp
             auto id = in_id_ptr2[offset];
             auto num1 = out_map[id];
             auto num2 = in_val_ptr2[offset];
-            out_map[id] = f(num1, num2);
+            out_map[id] = broadcast_f(num1, num2);
             out_set.erase(id);
         }
         // when num1 != 0, num2 == 0
         for (const auto& id : out_set) {
-            out_map[id] = f(out_map[id], 0);
+            out_map[id] = broadcast_f(out_map[id], 0);
         }
         // write map values to out tensor
         int offset = 0;
@@ -247,27 +264,34 @@ SparseTensor sparse_elementwise_template(SparseTensor& input1, SparseTensor& inp
     return SparseTensor(out.indices, out.values, out_sparse_dim, input1.range());
 }
 
+template SparseTensor sparse_elementwise_template<float>(
+    SparseTensor& input1, SparseTensor& input2, const templateFn<float>& f);
+template SparseTensor sparse_elementwise_template<double>(
+    SparseTensor& input1, SparseTensor& input2, const templateFn<double>& f);
+
 
 /**
  * @param input2 _indices: [sparse_dims, nse], _values: [nse, dense_dims]
  */
+template<typename T>
 SparseTensor sparse_elementwise_template(
     SparseTensor& input1, 
     torch::Tensor& input2, 
-    const templateFn& f,
+    const templateFn<T>& f,
     bool inplace
 ) {
     TORCH_CHECK(input2.layout() == torch::kSparse);
+    TORCH_CHECK(input1.dtype() == input2.dtype());
     TORCH_CHECK(input2._values().dim() == 1, "input2 currently not support dense tensor");
     auto indices1 = input1.indices();
     auto values1 = input1.values();
     auto id1_sizes = indices1.sizes().vec();
     auto val1_sizes = values1.sizes().vec();
     auto id1_ptr = input1.c_indices_ptr();
-    auto val1_ptr = input1.c_values_ptr();
+    auto val1_ptr = input1.values().contiguous().data_ptr<T>();
     auto indices2 = input2._indices();
     auto id2_ptr = indices2.data_ptr<int64_t>();
-    auto val2_ptr = input2._values().data_ptr<float>();
+    auto val2_ptr = input2._values().data_ptr<T>();
     auto sparse_dim = input1.sparse_dim();
     auto sparse_dims2 = indices2.size(0);
     TORCH_CHECK(sparse_dims2 == values1.dim());
@@ -284,7 +308,7 @@ SparseTensor sparse_elementwise_template(
         out = SparseTensor(ids, vals, sparse_dim, input1.range());
     }
     // auto out_id_ptr = out.c_indices_ptr();
-    auto out_val_ptr = out.c_values_ptr();
+    auto out_val_ptr = out.values().contiguous().data_ptr<T>();
     for (const auto i : c10::irange(nse)) {
         // traversal along the sparse dim, find sparse1_id == sparse2_id
         for (const auto j : c10::irange(input1._size(sparse_dim))) {
@@ -316,3 +340,8 @@ SparseTensor sparse_elementwise_template(
 
     return out;
 }
+
+template SparseTensor sparse_elementwise_template<float>(
+    SparseTensor& input1, torch::Tensor& input2, const templateFn<float>& f, bool inplace);
+template SparseTensor sparse_elementwise_template<double>(
+    SparseTensor& input1, torch::Tensor& input2, const templateFn<double>& f, bool inplace);

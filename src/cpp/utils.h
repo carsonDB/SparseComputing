@@ -9,9 +9,13 @@ namespace thIndex = torch::indexing;
 using namespace std;
 
 
-inline void check_dim(torch::Tensor& x, int dim) {
-    TORCH_CHECK(x.dim() == dim, "Tensor must be dim = ", to_string(dim), " but ", x.dim());
-}
+template<typename T>
+struct OutSparseTensor_T {
+    torch::Tensor indices;
+    torch::Tensor values;
+    int64_t* id_ptr;
+    T* val_ptr;
+};
 
 struct OutSparseTensor {
     torch::Tensor indices;
@@ -29,8 +33,30 @@ inline OutSparseTensor create_sparse_IdVal(const vector<int64_t>& id_shape, cons
     return {indices, values, id_ptr, val_ptr};
 }
 
+template<typename T>
+inline OutSparseTensor_T<T> create_sparse_IdVal_options(
+    const vector<int64_t>& id_shape, 
+    const vector<int64_t>& val_shape,
+    const torch::TensorOptions& options
+) {
+    auto indices = torch::zeros(id_shape, options.dtype(torch::kI64));
+    auto values = torch::zeros(val_shape, options);
+    auto id_ptr = indices.data_ptr<int64_t>();
+    auto val_ptr = values.data_ptr<T>();
+
+    return {indices, values, id_ptr, val_ptr};
+}
+
 inline OutSparseTensor create_sparse_IdVal(const vector<int64_t>& shape) {
     return create_sparse_IdVal(shape, shape);
+}
+
+template<typename T>
+inline OutSparseTensor_T<T> create_sparse_IdVal_options(
+    const vector<int64_t>& shape, 
+    const torch::TensorOptions& options
+) {
+    return create_sparse_IdVal_options<T>(shape, shape, options);
 }
 
 
