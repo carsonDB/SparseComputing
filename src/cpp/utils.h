@@ -4,6 +4,7 @@
 #include <ATen/ParallelOpenMP.h>
 #include <vector>
 #include <string>
+#include <limits>
 
 namespace thIndex = torch::indexing;
 using namespace std;
@@ -74,6 +75,20 @@ inline int64_t local2global_offset(const vector<int64_t>& sizes, const vector<in
 }
 
 /**
+ * @param locals must have same length with params `sizes`
+ */
+inline int64_t local2global_offset(const vector<int64_t>& sizes, const int64_t* locals) {
+    auto dims = sizes.size();
+    int64_t offset = 0;
+    for (const auto i : c10::irange(dims)) {
+        offset += locals[i];
+        if (i + 1 < dims)
+            offset *= sizes[i+1];
+    }
+    return offset;
+}
+
+/**
  * @param sizes should be value copied, since it will be modified.
  * Each id in locals will remainder.
  * If locals is longer than sizes, then prefix sizes with 1.
@@ -93,7 +108,32 @@ inline int64_t local2global_offset_broadcast(vector<int64_t> sizes, const vector
     return offset;
 }
 
-inline void global2local_offset(
+/**
+ * @param sizes should be value copied, since it will be modified.
+ * @param local_size length of locals array.
+ * Each id in locals will remainder.
+ * If locals is longer than sizes, then prefix sizes with 1.
+ */
+inline int64_t local2global_offset_broadcast(
+    vector<int64_t> sizes, 
+    const int64_t* locals, 
+    const int64_t local_size
+) {
+    TORCH_CHECK((int)sizes.size() <= local_size);
+    size_t num_prefix = local_size - sizes.size();
+    sizes.insert(sizes.begin(), num_prefix, 1);
+
+    auto dims = sizes.size();
+    int64_t offset = 0;
+    for (const auto i : c10::irange(dims)) {
+        offset += locals[i] % sizes[i];
+        if (i + 1 < dims)
+            offset *= sizes[i+1];
+    }
+    return offset;
+}
+
+inline void global2locals_offset(
     const vector<int64_t>& sizes, 
     int64_t offset, 
     vector<int64_t>& out_vec
@@ -107,6 +147,31 @@ inline void global2local_offset(
 }
 
 /**
+ * @param out_ptr array (len = sizes.size())
+ */
+inline void global2locals_offset(
+    const vector<int64_t>& sizes, 
+    int64_t offset,
+    int64_t* out_ptr
+) {
+    int dims = sizes.size();
+    for (const auto j : c10::irange(dims)) {
+        auto dim = dims - j - 1;
+        out_ptr[dim] = offset % sizes[dim];
+        offset /= sizes[dim];
+    }
+}
+
+inline void parallel_for(int64_t size, bool parallel, const function<void(int64_t)>& f) {
+    auto grain_size = parallel ? 0 : size;
+    at::parallel_for(0, size, grain_size, [&](int64_t start, int64_t end) {
+        for (const auto& i : c10::irange(start, end)) {
+            f(i);
+        }
+    });
+}
+
+/**
  * parallel iteration
  * @param sizes vector of shape;
  * @tparam f (vector<int64_t> local_offsets, int64_t global_offset) -> void 
@@ -114,16 +179,17 @@ inline void global2local_offset(
 inline void sizes_for(
     vector<int64_t>& sizes,
     bool parallel,
-    const function<void (vector<int64_t>&, int64_t)>& f
+    const function<void (int64_t*, int64_t)>& f
 ) {
-    int numel = 1;
-    for (const auto s : sizes) 
-        numel *= s;
+    int numel = accumulate(sizes.begin(), sizes.end(), 1, multiplies<int64_t>());
+    // for (const auto s : sizes) 
+    //     numel *= s;
     auto grain_size = parallel ? 0 : numel;
     at::parallel_for(0, numel, grain_size, [&](int64_t start, int64_t end) {
-        vector<int64_t> ids(sizes.size(), 0);
+        // vector<int64_t> ids(sizes.size(), 0);
+        int64_t ids[sizes.size()];
         for (const auto i : c10::irange(start, end)) {
-            global2local_offset(sizes, i, ids);
+            global2locals_offset(sizes, i, ids);
             f(ids, i);
         }
     });
@@ -131,5 +197,10 @@ inline void sizes_for(
 
 
 torch::Tensor reservoir_sampling(int n, int k);
+
+
+pair<torch::Tensor, torch::Tensor> sorted_merge(const torch::Tensor& input, set<int64_t>& axis, int64_t sorted_axis);
+
+
 
 #endif

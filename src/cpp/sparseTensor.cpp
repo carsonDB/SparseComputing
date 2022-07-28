@@ -36,7 +36,11 @@ SparseTensor coalesce_template(SparseTensor& input) {
     auto val_ptr = vals.contiguous().data_ptr<T>();
     auto sparse_size = sizes[sparse_dim];
     // sparse size is 0 or 1
-    if (sparse_size <= 1) return input.update_with(ids, vals, sparse_dim);
+    if (sparse_size <= 1) {
+        auto out = input.update_with(ids, vals, sparse_dim);
+        out.c_set_coalesced(true);
+        return out;
+    };
     // sparse_stride: distance between nearest sparse id
     int sparse_stride = 1;
     for (size_t i = sparse_dim + 1; i < sizes.size(); i++)
@@ -57,7 +61,7 @@ SparseTensor coalesce_template(SparseTensor& input) {
     auto unique_vals = torch::zeros_like(vals);
     auto unique_val_ptr = unique_vals.data_ptr<T>();
     auto valid_length = vector<int64_t>(unrelated_numel, 0);
-    sizes_for(unrelated_sizes, true, [&](vector<int64_t>& locals, auto global) {
+    sizes_for(unrelated_sizes, true, [&](auto locals, auto global) {
         auto start = local2global_offset(sizes, locals);
         auto end = start + sparse_size * sparse_stride;
         // unique
@@ -66,7 +70,7 @@ SparseTensor coalesce_template(SparseTensor& input) {
             unique_val_ptr[j] += val_ptr[start + sorted_map_ptr[i] * sparse_stride];
             if (sorted_id_ptr[i] != sorted_id_ptr[i + sparse_stride]) {
                 unique_id_ptr[j] = sorted_id_ptr[i];
-                j += sparse_stride;
+                unique_val_ptr[j] != 0 && (j += sparse_stride); // after unique, still zero, prepare for next.
             }
         }
         // Store the last element
@@ -76,15 +80,18 @@ SparseTensor coalesce_template(SparseTensor& input) {
     });
     // remove all same zeros tailing
     auto max_len = *max_element(valid_length.begin(), valid_length.end());
-    vector<at::indexing::TensorIndex> slices(sizes.size(), "...");
-    slices[sparse_dim] = torch::indexing::Slice(0, max_len, 1);
-    auto out_ids = unique_ids.index(slices);
-    auto out_vals = unique_vals.index(slices);
+    auto out_ids = unique_ids.narrow(sparse_dim, 0, max_len).contiguous();
+    auto out_vals = unique_vals.narrow(sparse_dim, 0, max_len).contiguous();
 
-    return input.update_with(out_ids, out_vals, sparse_dim);
+    auto output = input.update_with(out_ids, out_vals, sparse_dim);
+    output.c_set_coalesced(true);
+    return output;
 }
 
 template SparseTensor coalesce_template<float>(SparseTensor& input);
 template SparseTensor coalesce_template<double>(SparseTensor& input);
+
+
+
 
 

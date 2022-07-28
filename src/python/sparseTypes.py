@@ -1,5 +1,6 @@
 """wrapper of cpp Sparse Classes"""
 from typing import Optional, List, Tuple, Union
+import functools
 import torch
 from torch import nn, Tensor
 
@@ -7,6 +8,8 @@ import sparseOps_cpp as spCpp
 from .utils import size_n_t_none, size_n_t, norm_tuple
 from .autograd import sparse_tensor_backward
 
+
+HANDLED_FUNCTIONS = {}
 
 class SparseTensor(object):
     """ sparse_tensor + dense_tensor
@@ -41,6 +44,9 @@ class SparseTensor(object):
     def range(self):
         return self.cTensor.range()
     
+    def is_coalesced(self):
+        return self.cTensor.is_coalesced()
+
     def coalesce(self):
         return SparseTensor(self.cTensor.coalesce())
 
@@ -107,7 +113,7 @@ class SparseTensor(object):
     def mask_on_dense(self, dense: Tensor):
         assert isinstance(dense, Tensor) and not dense.is_sparse
         ids = self.indices()
-        vals = dense.gather(self.sparse_dim(), ids)
+        vals = dense.gather(self.sparse_dim(), ids) * (self.values() != 0).to(self.dtype)
         return self.update_with(indices=ids, values=vals)
 
     def mask(self):
@@ -158,6 +164,12 @@ class SparseTensor(object):
     def shape(self):
         return self.size()
 
+    def numel(self):
+        acc = 1
+        for i in self.size():
+            acc *= i
+        return acc
+
     @property
     def dtype(self):
         return self.values().dtype
@@ -170,6 +182,7 @@ class SparseTensor(object):
         if isinstance(other, Tensor):
             if other.layout == torch.sparse_coo:
                 pass # todo...
+                raise NotImplemented('sparse_coo todo...')
             else:
                 raise NotImplementedError
         else:
@@ -179,7 +192,7 @@ class SparseTensor(object):
         ids = self.expand_indices_as_values()
         vals = self.values() * alpha
         dense.scatter_add_(self.sparse_dim(), ids, vals)
-    
+
     def __add__(self, other):
         return elementwise_ops(self, other, 'add')
 
@@ -214,10 +227,31 @@ class SparseTensor(object):
             vals[vals != vals] = 0 # nan -> 0. when div by 0
             return self.update_with(values=vals)
         raise NotImplementedError
+
+    def __gt__(self, other):
+        return elementwise_ops(self, other, 'gt')
+    
+    def __ge__(self, other):
+        return elementwise_ops(self, other, 'ge')
+    
+    def __lt__(self, other):
+        return elementwise_ops(self, other, 'lt')
+    
+    def __le__(self, other):
+        return elementwise_ops(self, other, 'le')
+    
+    def __eq__(self, other):
+        return elementwise_ops(self, other, 'eq')
     
     def div_(self, other):
         return elementwise_ops(self, other, 'div', inplace=True)
     
+    def max(self, dim: size_n_t_none = None, keepdim=False):
+        return reduce_ops(self, dim, keepdim, 'max')
+    
+    def min(self, dim: size_n_t_none = None, keepdim=False):
+        return reduce_ops(self, dim, keepdim, 'min')
+
     def sum(self, dim: size_n_t_none = None, keepdim=False):
         return reduce_ops(self, dim, keepdim, 'sum')
 
@@ -236,20 +270,104 @@ class SparseTensor(object):
     def sqrt(self):
         return elementwise_ops(self, 0.5, 'pow')
 
-    def topk(self, k, dim, **kwargs):
-        assert dim == self.sparse_dim, 'only support when dim = sparse_dim'
-        vals, ids = self.values().topk(k, dim, **kwargs)
-        ids = self.indices().gather(dim, ids)
-        return self.update_with(indices=ids, values=vals)
+    def __neg__(self):
+        return self.update_with(values=-self.values())
 
     def backward(self, grad = None):
         if not isinstance(grad, SparseTensor):
             raise NotImplementedError
         sparse_tensor_backward(self, grad)
 
+    def register_hook(self, fn):
+        # todo...
+        pass
+
     def clone(self):
         return self.update_with(indices=self.indices().clone(), values=self.values().clone())
-            
+    
+    def detach(self):
+        return self.update_with(indices=self.indices().detach(), values=self.values().detach())
+
+    def to(self, *args, **kwargs):
+        return self.update_with(values=self.values().to(*args, **kwargs))
+
+    def reshape(self, shape: List[int]):
+        acc = 1
+        id = -1
+        for i, s in enumerate(shape):
+            if s == -1 and id == -1:
+                id = i
+            else:
+                assert s > 0, 'only allow at most one -1 dimension'
+                acc *= s
+        
+        out_shape = shape.copy()
+        if id >= 0:
+            out_shape[id] = self.numel() // acc
+
+        t = spCpp.reshape(self.cTensor, out_shape)
+        return SparseTensor(t)
+
+    def contiguous(self):
+        return self.update_with(indices=self.indices().contiguous(), values=self.values().contiguous())
+
+    def topk(self, k):
+        """topk along sparse_dim
+        """
+        assert self.indices().dim() == self.values().dim(), """
+            only support scalar value, but indices.dim={}, values.dim={}""".format(
+                self.indices().dim, self.values().dim)
+        dim = self.sparse_dim()
+        k = min(k, self.indices().shape[dim])
+        vals, ids = self.values().topk(k, dim, largest=True, sorted=False)
+        ids = self.indices().gather(dim, ids)
+        return self.update_with(indices=ids, values=vals)
+
+    @classmethod
+    def randn(cls, shape, topk, sparse_dim, variant_len=False):
+        """
+            variant_len: have different length, with zeros tailing, along each sorted array (sparse_dim)
+        """
+        out = cls.from_dense(torch.randn(*shape), topk, sparse_dim)
+        if not variant_len:
+            return out.coalesce()
+        ids_shape = list(out.indices().shape).copy()
+        mask_shape = ids_shape.copy()
+        mask_shape[sparse_dim] = 1
+        arange_shape = [1] * sparse_dim + [-1] + [1] * (len(mask_shape) - sparse_dim - 1)
+        mask = torch.arange(topk).view(arange_shape) < torch.randint(0, topk, mask_shape)
+        out = out.update_with(indices=out.indices() * mask, values=out.values() * mask).coalesce()
+        return out
+    
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        if func not in HANDLED_FUNCTIONS or not all(
+            issubclass(t, (torch.Tensor, SparseTensor))
+            for t in types
+        ):
+            return NotImplemented
+        return HANDLED_FUNCTIONS[func](*args, **kwargs)
+
+
+def implements(torch_function):
+    """Register a torch function override for SparseTensor"""
+    @functools.wraps(torch_function)
+    def decorator(func):
+        HANDLED_FUNCTIONS[torch_function] = func
+        return func
+    return decorator
+
+
+@implements(torch.zeros_like)
+def zeros_like(input: SparseTensor, **kwargs) -> Tensor:
+    vals = input.values()
+    out = torch.zeros(input.shape, dtype=input.dtype, layout=vals.layout, device=vals.device)
+    if 'memory_format' in kwargs:
+        out.memory_format = kwargs['memory_format']
+    return out
+
 
 def reduce_ops(
     input: SparseTensor,
@@ -290,7 +408,8 @@ def elementwise_ops(
         assert hasattr(spCpp, 'elementwise_' + op), 'not Implemented yet'
         cTensor = getattr(spCpp, 'elementwise_' + op)(input.cTensor, other, inplace)
         return input if inplace else SparseTensor(cTensor)
-        
+    elif isinstance(other, Tensor) and not other.is_sparse:
+        raise NotImplementedError('temporarily use `mask_on_dense` to convert dense to sparse before.')
     else:
         raise NotImplementedError
 
@@ -308,6 +427,10 @@ class SparseParameter(nn.Parameter):
     def data(self):
         return self._data
 
+    @data.setter
+    def data(self, data):
+        self._data = data
+
     @property
     def grad(self):
         return self._data.grad
@@ -323,7 +446,8 @@ class SparseParameter(nn.Parameter):
     def shape(self):
         return self.size()
     
-    # todo... requires_grad ??
+    def add_(self, other):
+        return self._data.add_(other)
     
     def __repr__(self):
         return 'Parameter containing:\n' + self._data.__repr__()

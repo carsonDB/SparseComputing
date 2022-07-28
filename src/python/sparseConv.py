@@ -2,7 +2,7 @@ from typing import Optional, List, Tuple, Union
 import math
 from torch import nn, Tensor
 from torch.autograd import Function
-import time
+import timeit
 import torch
 
 import sparseOps_cpp as spCpp
@@ -11,18 +11,47 @@ from .utils import size_2_t, norm_tuple
 from .autograd import SparseFunction
 
 
+def weight_grads_to_coo_tensor(out_channels_ids: torch.Tensor, weight_grads: spCpp.SparseTensor):
+    """ out_c is part of out_channels
+        - out_channels_ids: [out_c]
+        - weight_grads: indices [out_c, in_c], values: [out_c, in_c, kernel_h, kernel_w]
+    return:
+        sparse_coo: indices: [2, out_c*in_c], values: [out_c*in_c], size: [out_c, range, kernel_h, kernel_w]
+    """
+    assert weight_grads.indices().dim() == 2
+    assert weight_grads.values().dim() == 4
+    w_shape = list(weight_grads.values().shape)
+    out_c, in_c = w_shape[:2]
+    nse = out_c * in_c
+    dims = weight_grads.indices().dim()
+    ids = torch.zeros(dims, nse, dtype=weight_grads.indices().dtype)
+    vals = weight_grads.values().view(nse, *w_shape[2:])
+    # fill ids
+    ids[0] = out_channels_ids[:, None].expand([out_c, in_c]).reshape(-1)
+    ids[1] = weight_grads.indices().view(-1)
+
+    return torch.sparse_coo_tensor(ids, vals, [w_shape[0], weight_grads.range(), *w_shape[2:]])
+
+
 class SparseConv2dFunction(SparseFunction):
     @staticmethod
     def forward(ctx, input: SparseTensor, weight: SparseTensor, kernel, stride, padding):
+        # start = timeit.default_timer()
         outputs, unfolded_input = spCpp.sparseConv2d_forward(input.cTensor, weight.cTensor, stride, padding)
-        ctx.saved_sparseTensors = [unfolded_input, kernel]
+        ctx.saved_sparseTensors = [unfolded_input, weight.cTensor, kernel]
+        # print(">> sparseConv2d_forward", timeit.default_timer() - start)
         return SparseTensor(outputs)
 
     @staticmethod
     def backward(ctx, grad: SparseTensor):
-        unfolded_input, kernel = ctx.saved_sparseTensors
-        grad_weight = spCpp.sparseConv2d_backward(grad.cTensor, unfolded_input, kernel)
-        return None, grad_weight, None, None, None
+        unfolded_input, weightCTensor, kernel = ctx.saved_sparseTensors
+        # start = timeit.default_timer()
+        out_channels_ids, weight_grads = spCpp.conv2d_backward(
+            grad.cTensor, unfolded_input, weightCTensor, kernel)
+        coo_grads = weight_grads_to_coo_tensor(out_channels_ids, weight_grads)
+        # print('>> sparseConv2d_backward', timeit.default_timer() - start)
+
+        return None, coo_grads, None, None, None
 
 
 class SparseConv2d(nn.Module):
@@ -75,3 +104,5 @@ class SparseConv2d(nn.Module):
 
     def forward(self, input: SparseTensor) -> SparseTensor:
         return SparseConv2dFunction.apply(input, self.weight.data, self.kernel_size, self.stride, self.padding)
+
+

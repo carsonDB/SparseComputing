@@ -1,7 +1,7 @@
 from typing import Optional, List, Tuple, Union
 from torch import nn, Tensor
 from torch.autograd import Function
-import time
+import timeit
 import torch
 
 import sparseOps_cpp as spCpp
@@ -24,20 +24,27 @@ class SparseBatchNorm2dFunction(SparseFunction):
         exponential_average_factor: float,
         eps: float,
     ) -> SparseTensor:
-        mean, var = running_mean, running_var
         dim = [0, 2, 3]
+        # start = timeit.default_timer()
+        input = input.coalesce()
         if is_training:
             count = input.count_nonzero(dim, True)
             mean = input.sum(dim, True) / count # count is zeros???
             x_centered = input - mean
             var = (x_centered ** 2).sum(dim, True) / count
-            std = (var + eps).sqrt()
-            x_norm = x_centered / std
-        # norm
+        else:
+            mean = input.mask_on_dense(running_mean[None, :, None, None].expand(*input.shape))
+            x_centered = input - mean
+            var = x_centered.mask_on_dense(running_var[None, :, None, None].expand(*x_centered.shape))
+        
+        # std = (var + eps).sqrt()
+        std = var.update_with(values=(var.values() + eps).sqrt()) # todo...
         x_norm = x_centered / std
-        ctx.save_for_backward(x_centered, x_norm, std, count)
-        # update running_... if training
+        # assert torch.isnan(x_norm.values()).sum().item() == 0, 'is_training: ' + str(is_training)
+        
         if is_training:
+            ctx.save_for_backward(x_centered, x_norm, std, count)
+            # update running_... if training
             mean = mean.squeeze([0, 2, 3])
             mean.mask_on_dense(running_mean).add_to_dense(running_mean, alpha=-exponential_average_factor)
             mean.add_to_dense(running_mean, alpha=exponential_average_factor)
@@ -45,17 +52,20 @@ class SparseBatchNorm2dFunction(SparseFunction):
             var.mask_on_dense(running_var).add_to_dense(running_var, alpha=-exponential_average_factor)
             var.add_to_dense(running_var, alpha=exponential_average_factor)
         
+        # print(">> sparseBatchNorm_forward", timeit.default_timer() - start)
         return x_norm
 
     @staticmethod
     def backward(ctx, grad: SparseTensor):
         dim = [0, 2, 3]
+        # start = timeit.default_timer()
         x_centered, x_norm, std, count = ctx.saved_tensors
         d_input = 1. / count / std * (
             count * grad - 
             grad.sum(dim, keepdim=True) - 
             x_norm * (grad * x_norm).sum(dim, keepdim=True))
         
+        # print('>> sparseBatchNorm_backward', timeit.default_timer() - start)
         return d_input, None, None, None, None, None
 
 
