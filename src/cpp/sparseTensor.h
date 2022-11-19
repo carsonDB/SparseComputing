@@ -9,7 +9,7 @@
 using namespace std;
 
 
-using Id2OffsetMap = unordered_map<int64_t, vector<int64_t>>;
+using Id2OffsetMap = vector<vector<int64_t>>;
 
 class SparseTensor {
     torch::Tensor _indices;

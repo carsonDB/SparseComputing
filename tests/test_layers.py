@@ -96,8 +96,8 @@ class TestConv(unittest.TestCase):
         assert_close(output1, output2)
 
     def test_forward_backward(self):
-        in_channels = 64; out_channels = 128; stride = [2, 2]; padding = [1, 1]; kernel = [4, 4]
-        input = SparseTensor.from_dense(torch.randn(64, in_channels, 16, 16), 16, 1)
+        in_channels = 64; out_channels = 512; stride = [2, 2]; padding = [1, 1]; kernel = [4, 4]
+        input = SparseTensor.randn((64, in_channels, 16, 16), 16, 1)
         conv = SparseConv2d(in_channels, 4, out_channels, kernel, stride, padding)
         dense_weight = conv.weight.data.to_dense().clone().detach()
         dense_weight.requires_grad = True
@@ -106,19 +106,20 @@ class TestConv(unittest.TestCase):
         output2 = F.conv2d(input.to_dense(), dense_weight, None, stride, padding)
         assert_close(output1.to_dense(), output2)
         # check backward
-        gradient = SparseTensor.from_dense(torch.randn(*output1.shape), out_channels//2, 1)
+        gradient = SparseTensor.randn(output1.shape, 32, 1)
         output1.backward(gradient)
         grad1 = conv.weight.grad.to_dense()
         conv.weight.grad = None
         output2.backward(gradient.to_dense())
         grad2 = dense_weight.grad
-        assert_close(grad1, grad2 * conv.weight.data.mask())
+        assert_close(grad1 * conv.weight.data.mask(), grad2 * conv.weight.data.mask())
+        # assert_close(grad1, grad2)
 
     def test_grad_check(self):
         # in_channels = 64; out_channels = 512; stride = [2, 2]; padding = [1, 1]; kernel = [4, 4]
-        # input = SparseTensor.from_dense(torch.randn(64, in_channels, 8, 8), 16, 1)
+        # input = SparseTensor.randn((64, in_channels, 8, 8), 16, 1)
         in_channels = 16; out_channels = 32; stride = [2, 2]; padding = [1, 1]; kernel = [2, 2]
-        input = SparseTensor.from_dense(torch.randn(16, in_channels, 4, 4), 4, 1)
+        input = SparseTensor.randn((16, in_channels, 4, 4), 4, 1)
         conv = SparseConv2d(in_channels, 4, out_channels, kernel, stride, padding)
         weight = conv.weight.data
         convF = SparseConv2dFunction()
@@ -126,7 +127,7 @@ class TestConv(unittest.TestCase):
         output0 = SparseConv2dFunction.forward(convF, input, weight, kernel, stride, padding)
         # exclude non-sense entries when value is 0
         out_grad = output0.update_with(values=(output0.values() != 0).to(output0.dtype))
-        grad1 = SparseConv2dFunction.backward(convF, out_grad)[1].to_dense() #* weight.mask()
+        grad1 = SparseConv2dFunction.backward(convF, out_grad)[1].to_dense() * weight.mask()
         # grad2
         grad2 = approx_grad(
             lambda x: SparseConv2dFunction.forward(convF, input, x, kernel, stride, padding), weight).to_dense()

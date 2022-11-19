@@ -12,28 +12,60 @@ inline int conv_length(int length, int kernel, int padding, int stride, int dila
  * Refer:
  * https://github.com/pytorch/pytorch/blob/v1.11.0/aten/src/ATen/native/Im2Col.cpp#L14
  * https://github.com/pytorch/pytorch/blob/v1.11.0/aten/src/ATen/native/im2col.h#L14
- * @param input shape [batch, channel, height, width]
+ * @param input 
+ *  - @param (channel_last=false) -> [batch, channel, height, width]
+ *  - @param (channel_last=true) -> [batch, height, width, channel]
  */
 template<typename T>
 torch::Tensor unfold_template(
-    const torch::Tensor& input, size_hw kernel, size_hw padding, size_hw stride, size_hw dilation
+    const torch::Tensor& input, 
+    size_hw kernel, 
+    size_hw padding, 
+    size_hw stride, 
+    size_hw dilation, 
+    bool channel_last=false
 ) {
     int batch_size = input.size(0);
-    int in_channels = input.size(1);
-    int in_height = input.size(2);
-    int in_width = input.size(3);
+    int in_channels = channel_last ? input.size(3) : input.size(1);
+    int in_height = channel_last ? input.size(1) : input.size(2);
+    int in_width = channel_last ? input.size(2) : input.size(3);
     int out_height = conv_length(in_height, kernel.h, padding.h, stride.h, dilation.h);
     int out_width = conv_length(in_width, kernel.w, padding.w, stride.w, dilation.w);
     int out_channels = in_channels * kernel.h * kernel.w;
 
-    auto output = torch::zeros({ batch_size, out_channels, out_height * out_width }, input.options());
+    vector<int64_t> out_shape = channel_last ? 
+        { batch_size, out_height * out_width, out_channels } :
+        { batch_size, out_channels, out_height * out_width };
+    auto output = torch::zeros(out_shape, input.options());
+    
     // make sure contiguous, then use pointer
     auto in_ptr = data_ptr<T>(input);
     auto out_ptr = data_ptr<T>(output);
-    at::parallel_for(0, batch_size, 0, [&](int64_t start, int64_t end) {
 
-        for (const auto b_i : c10::irange(start, end)) {
-            
+    if (channel_last) { // todo...
+        parallel_for(batch_size, true, [&](auto b_i) {
+            for (const auto h_i : c10::irange(out_height)) {
+                int64_t h_in = h_i * stride.h - padding.h + h_offset * dilation.h;
+                
+                for (const auto w_i : c10::irange(out_width)) {
+                    int64_t w_in = w_i * stride.w - padding.w + w_offset * dilation.w;
+
+                    for (const auto col_i : c10::irange(out_channels)) {
+                        auto w_offset = col_i % kernel.w;
+                        auto h_offset = (col_i / kernel.w) % kernel.h;
+                        auto c_in = col_i / kernel.h / kernel.w;
+
+                        out_ptr[((b_i * out_height + h_i) * out_width + w_i) * out_channels + col_i] =
+                            (h_in >= 0 && w_in >= 0 && h_in < in_height && w_in < in_width)
+                            ? in_ptr[((b_i * in_channels + c_in) * in_height + h_in) * in_width + w_in]
+                            : static_cast<T>(0);
+                    }
+                }
+            }
+        });
+    }
+    else {
+        parallel_for(batch_size, true, [&](auto b_i) {
             for (const auto col_i : c10::irange(out_channels)) {
                 auto w_offset = col_i % kernel.w;
                 auto h_offset = (col_i / kernel.w) % kernel.h;
@@ -44,29 +76,24 @@ torch::Tensor unfold_template(
                     
                     for (const auto w_i : c10::irange(out_width)) {
                         int64_t w_in = w_i * stride.w - padding.w + w_offset * dilation.w;
+
                         out_ptr[((b_i * out_channels + col_i) * out_height + h_i) * out_width + w_i] =
                             (h_in >= 0 && w_in >= 0 && h_in < in_height && w_in < in_width)
                             ? in_ptr[((b_i * in_channels + c_in) * in_height + h_in) * in_width + w_in]
                             : static_cast<T>(0);
-                        // out_ptr[((b_i * out_height + h_i) * out_width + w_i) * out_channels + col_i] =
-                        //     (h_in >= 0 && w_in >= 0 && h_in < in_height && w_in < in_width)
-                        //     ? in_ptr[((b_i * in_channels + c_in) * in_height + h_in) * in_width + w_in]
-                        //     : static_cast<T>(0);
                     }
                 }
             }
-        }
-    });
+        });
+    }
 
     return output;
 }
 
 template
 torch::Tensor unfold_template<float>(const torch::Tensor& input, size_hw kernel, size_hw padding, size_hw stride, size_hw dilation);
-
 template
 torch::Tensor unfold_template<double>(const torch::Tensor& input, size_hw kernel, size_hw padding, size_hw stride, size_hw dilation);
-
 template
 torch::Tensor unfold_template<int64_t>(const torch::Tensor& input, size_hw kernel, size_hw padding, size_hw stride, size_hw dilation);
 
@@ -89,6 +116,7 @@ vector<SparseTensor> sparseConv2d_forward_template(
     vector<int64_t> padding
 ) {
     TORCH_CHECK(input.dtype() == weight.dtype()); // only use input.dtype for out.dtype
+    TORCH_CHECK(input.sparse_dim() == 1, "input should be channel-first layout format.");
     TORCH_CHECK(input.indices().dim() == 4, "input.indices should be dim = 4");
     TORCH_CHECK(input.values().dim() == 4, "input.values should be dim = 4");
     TORCH_CHECK(weight.indices().dim() == 2, "weight.indices should be dim = 2");
@@ -119,7 +147,6 @@ vector<SparseTensor> sparseConv2d_forward_template(
     
     // calculate longest sub_channels of output
     int max_channels = 0;
-    // auto start = high_resolution_clock::now();
     at::parallel_for(0, batch_size, 0, [&](int64_t start, int64_t end) {
         for (const auto bt : c10::irange(start, end)) { // batch
             for (const auto bk : c10::irange(n_blocks)) { // block
@@ -133,12 +160,11 @@ vector<SparseTensor> sparseConv2d_forward_template(
                         out_ids.insert(link_offset / in_connects);
                     }
                 }
+                // todo...bug: max_channels may have multiple threads writing problem.
                 max_channels = max(max_channels, (int)out_ids.size());
             }
         }
     });
-    // auto end = high_resolution_clock::now();
-    // cout << "(elapse): " << duration_cast<milliseconds>(end - start).count() << " ms" << endl;
 
     auto out = create_sparse_IdVal_options<T>(
         {batch_size, max_channels, out_height, out_width}, 
@@ -190,6 +216,66 @@ template vector<SparseTensor> sparseConv2d_forward_template<double>(
 
 
 /**
+ * @param input indices/values: [batch, channel, height, width]
+ * @param weight 
+ *  indices: [out_channel, in_connects], 
+ *  value: [out_channel, in_connects, kernel_height, kernel_width]
+ * @param stride [height, width]
+ * @param padding [height, width]
+ * @return indices/values: [batch, sub_channels, height, width]
+ *  {output, unfold_cols}
+ */
+template<typename T>
+vector<SparseTensor> sparseConv2d_forward_template_v1(
+    SparseTensor& input,
+    SparseTensor& weight,
+    vector<int64_t> stride,
+    vector<int64_t> padding
+) {
+    TORCH_CHECK(input.dtype() == weight.dtype()); // only use input.dtype for out.dtype
+    TORCH_CHECK(input.indices().dim() == 4, "input.indices/values should be dim = 4");
+    TORCH_CHECK(input.sparse_dim() == 3, "input should be channel-last layout format.");
+    TORCH_CHECK(input.values().dim() == 4, "input.values should be dim = 4");
+    TORCH_CHECK(weight.indices().dim() == 2, "weight.indices should be dim = 2");
+    TORCH_CHECK(weight.values().dim() == 4, "weight.values should be dim = 4");
+    TORCH_CHECK(stride.size() == 2, "stride must be length = 2");
+    TORCH_CHECK(padding.size() == 2, "padding must be length = 2");
+    // TORCH_CHECK(input.is_coalesced(), "input must be coalesced");
+    unfold_channel_last(input.indices());
+    unfold_channel_last(input.values());
+    // unfolded_cols [batch, num_blocks, kernel_h, kernel_w, in_sub_channels (sparse)]
+    
+    // find max_out_channels
+    auto out_channels_stats = torch::zeros({ batch_size * num_blocks }, torch::dtype(torch::kI64));
+    auto out_channels_stats_ptr = data_ptr<int64_t>(out_channels_stats);
+    
+    unfolded_merged [batch, num_blocks, kernel_h * kernel_w * in_sub_channels (sparse)]
+    sizes_for(unfolded_merged, true, [&]() {
+        // todo...
+    });
+
+    
+
+    // create out tensor: [batch, num_block, kernel_h, kernel_w, max_out_channels(sparse)]
+    auto max_out_channels = out_channels_stats.max().item<int64_t>();
+    auto out = create_sparse_IdVal_options();
+
+    parrallel_for(batch_size * num_blocks, true, [&](auto i) {
+        // find all out_channels_ids required
+
+        // todo...
+        
+    });
+
+
+    return {
+        SparseTensor(out.indices, out.values, input.sparse_dim(), out_channels),
+        SparseTensor(indices_blocks, values_blocks, 1, input.range()) // id still in [0, in_channels]
+    };
+}
+
+
+/**
  * @param grad [batch, sub_out_channels, out_height, out_width]
  * @param unfolded_inputs [batch, (sub_in_channels_hw) sub_in_channels * kernel_h * kernel_w, n_blocks (out_height*out_height)]
  *  id in unfolded_inputs is not include kernel_h, kernel_w
@@ -217,7 +303,7 @@ torch::Tensor sparseConv2d_backward_template_v0(
 
     unordered_map<int64_t, T> out_map;
     // be careful about the parallel, since they use the same unordered_map
-    sizes_for(grad_shape, false, [&](auto locals, auto i) {
+    sizes_for_vec(grad_shape, false, [&](vector<int64_t> locals, const int64_t i) {
         auto b_i = locals[0];
         // auto out_c_offset = locals[1];
         auto h_i = locals[2];
@@ -324,7 +410,6 @@ SparseWeightGrads conv2d_backward_template(
     auto grad_ids = get<0>(sorted_tuple), grad_map = get<1>(sorted_tuple);
     auto grad_ids_ptr = data_ptr<int64_t>(grad_ids);
     auto grad_map_ptr = data_ptr<int64_t>(grad_map);
-    auto end = high_resolution_clock::now();
     
     // size of output (unique ids)
     auto out_channels_ids = vector<int64_t>();
@@ -335,7 +420,7 @@ SparseWeightGrads conv2d_backward_template(
             out_channels_id_start.push_back(i);
         }
     }
-    
+
     // create output tensor
     auto out = create_sparse_IdVal_options<T>(
         { (int)out_channels_ids.size(), weight._size(1)},
@@ -349,7 +434,7 @@ SparseWeightGrads conv2d_backward_template(
     // start = high_resolution_clock::now();
     // sort unfolded_inputs
     auto sorted_input_ids = unfolded_inputs.indices().sort(1);
-    end = high_resolution_clock::now();
+    // end = high_resolution_clock::now();
     // cout << "(unfolded_inputs sort): " << duration_cast<milliseconds>(end - start).count() << " ms" << endl;
     
     auto input_val_ptr = values_ptr<T>(unfolded_inputs);
@@ -358,7 +443,7 @@ SparseWeightGrads conv2d_backward_template(
     // calculate out.values
     // int out_offset = 0; // todo... move to paralle_for
     int out_channels_stride = weight._size(1) * weight._size(2) * weight._size(3);
-    // auto grad_locals = vector<int64_t>(grad_sizes.size(), 0);
+    // auto grad_locals = vector<int64_t>(grad_sizes.size(), 0); // todo... only for serial
     auto input_example_size = unfolded_inputs._size(1) * unfolded_inputs._size(2);
     auto kernel_size = kernel[0] * kernel[1];
     auto in_channels_stride = unfolded_inputs._size(2); // include kernel_h, kernel_w
@@ -402,6 +487,39 @@ SparseWeightGrads conv2d_backward_template(
     });
     // end = high_resolution_clock::now();
     // cout << "(body elapse): " << duration_cast<milliseconds>(end - start).count() << " ms" << endl;
+
+    // for (int i = 0; i < grad_numel; i++) {
+    //     auto out_channels_id = grad_ids_ptr[i];
+    //     auto offset = grad_map_ptr[i];
+    //     const auto val = grad_vals_ptr[offset];
+    //     global2locals_offset(grad_sizes, offset, grad_locals);
+    //     // traversal each in_connect, from weight.indice
+    //     for (int j = 0; j < weight_in_channels; j++) {
+    //         auto in_channels_id = weight_ids_ptr[out_channels_id * weight_in_channels + j];
+    //         auto start = grad_locals[0] * input_example_size + grad_locals[2] * grad_sizes[3] + grad_locals[3];
+    //         auto end = start + in_channels_stride * unfolded_inputs._size(1);
+
+    //         auto offset = strided_binary_search(sorted_input_id_ptr, in_channels_stride, start, end, in_channels_id);
+
+    //         // write to out tensor if non-zero in inputs
+    //         if (offset < 0) continue;
+    //         // each point within [kernel_h, kernel_w]
+    //         for (int k = offset; k < end; k += in_channels_stride) {
+    //             // channels_offset: [sub_in_channels, kernel_h, kernel_w]
+    //             auto channels_offset = sorted_input_map_ptr[k];
+    //             auto kernel_offset = channels_offset % kernel_size;
+    //             auto in_val = input_val_ptr[start + channels_offset * in_channels_stride];
+    //             out.val_ptr[out_offset + j * kernel_size + kernel_offset] += in_val * val;
+    //             if (k + in_channels_stride < end
+    //                 && sorted_input_id_ptr[k] != sorted_input_id_ptr[k + in_channels_stride]) break;
+    //         }
+    //     }
+    //     // to next out_channels_id
+    //     if (i + 1 < grad_numel && grad_ids_ptr[i] != grad_ids_ptr[i + 1]) {
+    //         out_offset += out_channels_stride;
+    //     }
+    // }
+
     
     return {
         torch::tensor(out_channels_ids),

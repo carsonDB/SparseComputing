@@ -10,15 +10,10 @@
  */
 void SparseTensor::build_id2offset_map() {
     id2offset_map.clear();
-    auto size = _indices.numel();
-    _indices = _indices.contiguous();
-    auto id_ptr = _indices.data_ptr<int64_t>();
-    for (const auto i : c10::irange(size)) {
-        auto id = id_ptr[i];
-        if (id2offset_map.find(id) != id2offset_map.end())
-            id2offset_map[id].push_back(i);
-        else
-            id2offset_map[id] = {i};
+    id2offset_map.resize(range()); // todo... reset to default element values
+    auto id_ptr = data_ptr<int64_t>(indices());
+    for (const auto& offset : c10::irange(indices().numel())) {
+        id2offset_map[id_ptr[offset]].push_back(offset);
     }
 }
 

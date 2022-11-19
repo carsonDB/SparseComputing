@@ -16,14 +16,14 @@ class Node():
         return self.backward_fn(self.ctx, *args)
 
 class GradAcc(Node):
-    # leaf variables
+    """leaf variables: use backward_hook to process grad if any"""
     def __init__(self, tensor):
         self.tensor = tensor
         self.next_functions = []
 
     def __call__(self, grad):
         # sparse tensor cannot be accumulated
-        self.tensor.grad = grad
+        self.tensor.grad = self.tensor.backward_hook(grad) if self.tensor.backward_hook else grad
 
 
 class SparseFunction():

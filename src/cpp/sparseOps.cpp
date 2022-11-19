@@ -512,10 +512,12 @@ SparseTensor elementwise_template(
     for (const auto i : c10::irange(dense_dims2))
         dense2_size *= input2._values().size(1 + i); // size(0) is nse
     
+    // input2 sparse_dims should cover input1 sparse_dims
+    // additional dims towards front part of input1.dense_dims
     TORCH_CHECK(sparse_dims2 + dense_dims2 == values1.dim());
     auto sparse_dims1 = indices1.dim();
     TORCH_CHECK(input1.indices().dim() <= sparse_dims2);
-    TORCH_CHECK(dense1_size == dense2_size, "input1 and input2 dense part should be exactly same.");
+    // TORCH_CHECK(dense1_size == dense2_size, "input1 and input2 dense part should be exactly same.");
 
     auto nse = indices2.size(1);
     auto id1_locals = vector<int64_t>(sparse_dims1, 0);

@@ -171,6 +171,7 @@ pair<torch::Tensor, torch::Tensor> sorted_merge(
         // heap alloc size larger than stack size (int64_t[...])
         // otherwise, stack overflow
         auto output = new int64_t[merged_size]{ -numeric_limits<int64_t>::max() };
+        // auto output = new int64_t[merged_size]();
         MergeInfo<int64_t> info = { in_ptr, sorted_length, sorted_stride, arrayId2addr };
         
         auto max_len = merge_strided_arrays<int64_t>(output, 0, n_array - 1, info);

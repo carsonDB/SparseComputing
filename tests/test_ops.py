@@ -2,14 +2,54 @@ from init import *
 
 
 class TestOps(unittest.TestCase):
+    
+    def test_cat(self):
+        # test when cat along sparse_dim
+        input = SparseTensor.from_dense(torch.randn(4, 4), 2, sparse_dim=1)
+        other = SparseTensor.from_dense(torch.randn(4, 4), 2, sparse_dim=1)
+        output1 = cat([input, other], dim=1).to_dense()
+        output2 = torch.cat([input.to_dense(), other.to_dense()], dim=1)
+        assert_close(output1, output2)
+        # test when cat not along sparse_dim
+        output1 = cat([input, other], dim=0).to_dense()
+        output2 = torch.cat([input.to_dense(), other.to_dense()], dim=0)
+        assert_close(output1, output2)
 
-    def test_sparse_dense_conversion(self):
-        input = torch.randn(64, 64, 16, 16)
-        sparse1 = SparseTensor.from_dense(input, 16, 1)
-        dense1 = sparse1.to_dense()
-        sparse2 = SparseTensor.from_dense(dense1, 16, 1)
-        dense2 = sparse2.to_dense()
-        assert_close(dense1, dense2)
+    def test_reshape(self):
+        torch.manual_seed(0)
+        input = SparseTensor.randn((64, 4, 8), 2, 1)
+        output1 = input.reshape([2, -1, 2])
+        output2 = input.to_dense().view(2, -1, 2)
+        assert_close(output1.to_dense(), output2)
+
+    def test_max_pool(self):
+        input = SparseTensor.from_dense(torch.randn(4, 4, 8, 8), 2, sparse_dim=1)
+        output1 = max_pool2d(input, [2, 2]).to_dense()
+        output2 = F.max_pool2d(input.to_dense(), [2, 2])
+        assert_close(output1, output2)
+
+    def test_topk(self):
+        topk = 16
+        input = SparseTensor.randn((64, 128, 8, 8), 32, sparse_dim=1, variant_len=True)
+        output1 = input.topk(topk)
+        self.assertEqual(output1.indices().shape[1], topk)
+        vals, ids = input.to_dense().topk(topk, dim=1)
+        output2 = torch.zeros_like(input.to_dense()).scatter(1, ids, vals)
+        assert_close(output1.to_dense(), output2)
+
+    def test_clamp_topk(self):
+        input = SparseTensor.from_dense([[1, 2., 3], [0, -1, 3]], 3, 1)
+        output1 = clamp_topk(input, 2, 1).to_dense()
+        output2 = torch.tensor([[0, 2., 3], [0, 0, 3]])
+        assert_close(output1, output2)
+        input = SparseTensor.randn((64, 128, 8, 8), 32, sparse_dim=1)
+        output1 = clamp_topk(input, k=16, dim=1).to_dense()
+        vals, ids = input.to_dense().topk(16, dim=1)
+        output2 = torch.zeros_like(input.to_dense()).scatter(1, ids, vals)
+        assert_close(output1, output2)
+
+
+class TestReduce(unittest.TestCase):
 
     def test_reduce_ops(self):
         input = SparseTensor.randn([32, 64, 8], 16, 1, variant_len=True) # try variant_len = True / False
@@ -50,6 +90,9 @@ class TestOps(unittest.TestCase):
         # assert_close(output1.to_dense(), output2)
         
         # input.prod()
+
+
+class TestElementwise(unittest.TestCase):
 
     def test_elementwise_ops(self):
         input = SparseTensor.randn((10, 5, 6, 3), 2, 1, variant_len=True)
@@ -96,7 +139,6 @@ class TestOps(unittest.TestCase):
         # print(output1.indices()[0])
         # assert_close(input.indices(), output1.coalesce().indices())
         
-
     def test_rdiv(self):
         # check __rtruediv__
         input = SparseTensor.from_dense([[1., 0.], [2, 3]], 2, 1)
@@ -105,77 +147,34 @@ class TestOps(unittest.TestCase):
         assert_close(output1, output2)
 
     def test_elementwise_with_coo(self):
-        input = SparseTensor.from_dense(torch.randn(4, 4), 2, sparse_dim=1)
-        other = SparseTensor.from_dense(torch.randn(4, 4), 2, sparse_dim=0).to_dense().to_sparse()
+        input = SparseTensor.randn((4, 4), 2, sparse_dim=1)
+        other = SparseTensor.randn((4, 4), 2, sparse_dim=0).to_dense().to_sparse()
         # test add_ (restrict by input mask)
         input1 = input.clone()
         output1 = input1.add_(other).to_dense()
         assert_close(output1, input1.to_dense())
-        output2 = (input.to_dense() + other.to_dense()) * input.mask()
+        output2 = input.to_dense() + other.to_dense() * input.mask()
         assert_close(output1, output2)
 
     def test_elementwise_with_coo_dense(self):
         # test add_ (+ dense_size as suffix)
-        id_range = 4; sparse_size = 2; dense_sizes = [3, 4]
-        ids1 = torch.randint(0, id_range, (4, sparse_size))
-        vals1 = torch.randn(4, sparse_size, *dense_sizes)
+        # input1: [sparse_dims (2) + dense_dims (2)]
+        id_range = 64; sparse_size = 20; dense_sizes = [30, 42]
+        ids1 = torch.randint(0, id_range, (42, sparse_size))
+        vals1 = torch.randn(42, sparse_size, *dense_sizes)
         input = SparseTensor.create(ids1, vals1, 1, id_range)
         input1 = input.clone()
-
-        nse = 3
-        ids2 = torch.randint(0, id_range, (2, nse))
-        vals2 = torch.randn(nse, *dense_sizes)
-        other = torch.sparse_coo_tensor(ids2, vals2, size=(4, id_range, *dense_sizes))
+        # input2: [sparse_dims (3) + dense_dims (1)]
+        nse = 32
+        ids2 = torch.cat([torch.randint(0, i, (1, nse)) for i in [42, id_range, dense_sizes[0]]], dim=0)
+        vals2 = torch.randn(nse, *dense_sizes[-1:])
+        other = torch.sparse_coo_tensor(ids2, vals2, size=(42, id_range, *dense_sizes))
         
         output1 = input1.add_(other).to_dense()
         assert_close(output1, input1.to_dense())
-        output2 = (input.to_dense() + other.to_dense()) * input.mask()
+        output2 = input.to_dense() + other.to_dense() * input.mask()
         assert_close(output1, output2)
 
-    def test_cat(self):
-        # test when cat along sparse_dim
-        input = SparseTensor.from_dense(torch.randn(4, 4), 2, sparse_dim=1)
-        other = SparseTensor.from_dense(torch.randn(4, 4), 2, sparse_dim=1)
-        output1 = cat([input, other], dim=1).to_dense()
-        output2 = torch.cat([input.to_dense(), other.to_dense()], dim=1)
-        assert_close(output1, output2)
-        # test when cat not along sparse_dim
-        output1 = cat([input, other], dim=0).to_dense()
-        output2 = torch.cat([input.to_dense(), other.to_dense()], dim=0)
-        assert_close(output1, output2)
-
-    def test_reshape(self):
-        torch.manual_seed(0)
-        input = SparseTensor.randn((64, 4, 8), 2, 1)
-        output1 = input.reshape([2, -1, 2])
-        output2 = input.to_dense().view(2, -1, 2)
-        assert_close(output1.to_dense(), output2)
-
-    def test_max_pool(self):
-        input = SparseTensor.from_dense(torch.randn(4, 4, 8, 8), 2, sparse_dim=1)
-        output1 = max_pool2d(input, [2, 2]).to_dense()
-        output2 = F.max_pool2d(input.to_dense(), [2, 2])
-        assert_close(output1, output2)
-
-    def test_topk(self):
-        topk = 16
-        input = SparseTensor.randn((64, 128, 8, 8), 32, sparse_dim=1, variant_len=True)
-        output1 = input.topk(topk)
-        self.assertEqual(output1.indices().shape[1], topk)
-        vals, ids = input.to_dense().topk(topk, dim=1)
-        output2 = torch.zeros_like(input.to_dense()).scatter(1, ids, vals)
-        assert_close(output1.to_dense(), output2)
-
-    def test_clamp_topk(self):
-        input = SparseTensor.from_dense([[1, 2., 3], [0, -1, 3]], 3, 1)
-        output1 = clamp_topk(input, 2, 1).to_dense()
-        output2 = torch.tensor([[0, 2., 3], [0, 0, 3]])
-        assert_close(output1, output2)
-        input = SparseTensor.randn((64, 128, 8, 8), 32, sparse_dim=1)
-        output1 = clamp_topk(input, k=16, dim=1).to_dense()
-        vals, ids = input.to_dense().topk(16, dim=1)
-        output2 = torch.zeros_like(input.to_dense()).scatter(1, ids, vals)
-        assert_close(output1, output2)
 
 
 if __name__ == '__main__':

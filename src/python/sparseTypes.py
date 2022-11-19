@@ -1,5 +1,6 @@
 """wrapper of cpp Sparse Classes"""
 from typing import Optional, List, Tuple, Union
+from types import SimpleNamespace
 import functools
 import torch
 from torch import nn, Tensor
@@ -23,6 +24,7 @@ class SparseTensor(object):
         self.cTensor = cTensor
         self.grad = None
         self.grad_fn = None
+        self.backward_hook = None
 
     @classmethod
     def create(cls, indices, values, sparse_dim, range, requires_grad=None):
@@ -277,10 +279,15 @@ class SparseTensor(object):
         if not isinstance(grad, SparseTensor):
             raise NotImplementedError
         sparse_tensor_backward(self, grad)
-
+    
     def register_hook(self, fn):
-        # todo...
-        pass
+        """backward hook for SparseTensor (only in custom autograd), for modifying self.grad
+        """
+        self.backward_hook = fn
+        def remove():
+            self.backward_hook = None
+        handler = SimpleNamespace(**{'remove': remove})
+        return handler
 
     def clone(self):
         return self.update_with(indices=self.indices().clone(), values=self.values().clone())

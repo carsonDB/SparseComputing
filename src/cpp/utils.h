@@ -117,9 +117,9 @@ inline int64_t local2global_offset_broadcast(vector<int64_t> sizes, const vector
 inline int64_t local2global_offset_broadcast(
     vector<int64_t> sizes, 
     const int64_t* locals, 
-    const int64_t local_size
+    size_t local_size
 ) {
-    TORCH_CHECK((int)sizes.size() <= local_size);
+    TORCH_CHECK(sizes.size() <= local_size);
     size_t num_prefix = local_size - sizes.size();
     sizes.insert(sizes.begin(), num_prefix, 1);
 
@@ -171,10 +171,35 @@ inline void parallel_for(int64_t size, bool parallel, const function<void(int64_
     });
 }
 
+
 /**
  * parallel iteration
  * @param sizes vector of shape;
  * @tparam f (vector<int64_t> local_offsets, int64_t global_offset) -> void 
+ */
+inline void sizes_for_vec(
+    vector<int64_t>& sizes,
+    bool parallel,
+    const function<void (vector<int64_t>, int64_t)>& f
+) {
+    int numel = accumulate(sizes.begin(), sizes.end(), 1, multiplies<int64_t>());
+    // for (const auto s : sizes) 
+    //     numel *= s;
+    auto grain_size = parallel ? 0 : numel;
+    at::parallel_for(0, numel, grain_size, [&](int64_t start, int64_t end) {
+        vector<int64_t> ids(sizes.size(), 0);
+        for (const auto i : c10::irange(start, end)) {
+            global2locals_offset(sizes, i, ids);
+            f(ids, i);
+        }
+    });
+}
+
+
+/**
+ * parallel iteration
+ * @param sizes vector of shape;
+ * @tparam f (int64_t* local_offsets, int64_t global_offset) -> void 
  */
 inline void sizes_for(
     vector<int64_t>& sizes,

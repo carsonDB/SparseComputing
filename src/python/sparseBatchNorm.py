@@ -28,7 +28,8 @@ class SparseBatchNorm2dFunction(SparseFunction):
         # start = timeit.default_timer()
         input = input.coalesce()
         if is_training:
-            count = input.count_nonzero(dim, True)
+            # count = input.count_nonzero(dim, True)
+            count = input.shape[0] * input.shape[2] * input.shape[3] # tmp...
             mean = input.sum(dim, True) / count # count is zeros???
             x_centered = input - mean
             var = (x_centered ** 2).sum(dim, True) / count
