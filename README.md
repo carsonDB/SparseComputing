@@ -1,17 +1,23 @@
-# C++/CUDA Extensions in PyTorch
+# Sparse computing extension for Pytorch
+Sparse tensors and related sparse computing ops (*CPU version*).
 
-An example of writing a C++ extension for PyTorch. See
-[here](http://pytorch.org/tutorials/advanced/cpp_extension.html) for the accompanying tutorial.
+## Code structure
+- `src/cpp`: (C++) core implements.
+- `src/python`: (Python) wrappers of C++ core and helpers for python world.
 
-There are a few "sights" you can metaphorically visit in this repository:
+## How to install
+At root directory, execute
+```python setup.py install```
 
-- Inspect the C++ and CUDA extensions in the `cpp/` and `cuda/` folders,
-- Build C++ and/or CUDA extensions by going into the `cpp/` or `cuda/` folder and executing `python setup.py install`,
-- JIT-compile C++ and/or CUDA extensions by going into the `cpp/` or `cuda/` folder and calling `python jit.py`, which will JIT-compile the extension and load it,
-- Benchmark Python vs. C++ vs. CUDA by running `python benchmark.py {py, cpp, cuda} [--cuda]`,
-- Run gradient checks on the code by running `python grad_check.py {py, cpp, cuda} [--cuda]`.
-- Run output checks on the code by running `python check.py {forward, backward} [--cuda]`.
+*Only tested in linux (wsl) environment.*
 
-## Authors
+## How to test
+In `./tests` directory, all test cases can be executed with
 
-[Peter Goldsborough](https://github.com/goldsborough)
+`python tests/{test_xxx.py}`
+
+For example, `python tests/test_ops.py`.
+
+## Reference
+- [Pytorch sparse document](https://pytorch.org/docs/stable/sparse.html)
+- [Extension: pytorch_sparse](https://github.com/rusty1s/pytorch_sparse)
