@@ -22,9 +22,9 @@ torch::Tensor unfold_template(
     size_hw kernel, 
     size_hw padding, 
     size_hw stride, 
-    size_hw dilation, 
-    bool channel_last=false
+    size_hw dilation
 ) {
+    bool channel_last = false; // todo... allow channel_last argument in the future.
     int batch_size = input.size(0);
     int in_channels = channel_last ? input.size(3) : input.size(1);
     int in_height = channel_last ? input.size(1) : input.size(2);
@@ -33,9 +33,9 @@ torch::Tensor unfold_template(
     int out_width = conv_length(in_width, kernel.w, padding.w, stride.w, dilation.w);
     int out_channels = in_channels * kernel.h * kernel.w;
 
-    vector<int64_t> out_shape = channel_last ? 
-        { batch_size, out_height * out_width, out_channels } :
-        { batch_size, out_channels, out_height * out_width };
+    vector<int64_t> out_shape = channel_last ?
+        vector<int64_t> { batch_size, out_height * out_width, out_channels } :
+        vector<int64_t> { batch_size, out_channels, out_height * out_width };
     auto output = torch::zeros(out_shape, input.options());
     
     // make sure contiguous, then use pointer
@@ -44,24 +44,24 @@ torch::Tensor unfold_template(
 
     if (channel_last) { // todo...
         parallel_for(batch_size, true, [&](auto b_i) {
-            for (const auto h_i : c10::irange(out_height)) {
-                int64_t h_in = h_i * stride.h - padding.h + h_offset * dilation.h;
+            // for (const auto h_i : c10::irange(out_height)) {
+            //     int64_t h_in = h_i * stride.h - padding.h + h_offset * dilation.h;
                 
-                for (const auto w_i : c10::irange(out_width)) {
-                    int64_t w_in = w_i * stride.w - padding.w + w_offset * dilation.w;
+            //     for (const auto w_i : c10::irange(out_width)) {
+            //         int64_t w_in = w_i * stride.w - padding.w + w_offset * dilation.w;
 
-                    for (const auto col_i : c10::irange(out_channels)) {
-                        auto w_offset = col_i % kernel.w;
-                        auto h_offset = (col_i / kernel.w) % kernel.h;
-                        auto c_in = col_i / kernel.h / kernel.w;
+            //         for (const auto col_i : c10::irange(out_channels)) {
+            //             auto w_offset = col_i % kernel.w;
+            //             auto h_offset = (col_i / kernel.w) % kernel.h;
+            //             auto c_in = col_i / kernel.h / kernel.w;
 
-                        out_ptr[((b_i * out_height + h_i) * out_width + w_i) * out_channels + col_i] =
-                            (h_in >= 0 && w_in >= 0 && h_in < in_height && w_in < in_width)
-                            ? in_ptr[((b_i * in_channels + c_in) * in_height + h_in) * in_width + w_in]
-                            : static_cast<T>(0);
-                    }
-                }
-            }
+            //             out_ptr[((b_i * out_height + h_i) * out_width + w_i) * out_channels + col_i] =
+            //                 (h_in >= 0 && w_in >= 0 && h_in < in_height && w_in < in_width)
+            //                 ? in_ptr[((b_i * in_channels + c_in) * in_height + h_in) * in_width + w_in]
+            //                 : static_cast<T>(0);
+            //         }
+            //     }
+            // }
         });
     }
     else {
@@ -215,8 +215,8 @@ template vector<SparseTensor> sparseConv2d_forward_template<double>(
     SparseTensor& input, SparseTensor& weight, vector<int64_t> stride, vector<int64_t> padding);
 
 
-/**
- * @param input indices/values: [batch, channel, height, width]
+/** Channel-last version...todo...
+ * @param input indices/values: [batch, height, width, channels]
  * @param weight 
  *  indices: [out_channel, in_connects], 
  *  value: [out_channel, in_connects, kernel_height, kernel_width]
@@ -232,6 +232,7 @@ vector<SparseTensor> sparseConv2d_forward_template_v1(
     vector<int64_t> stride,
     vector<int64_t> padding
 ) {
+    TORCH_CHECK(false, "not implemented yet.");
     TORCH_CHECK(input.dtype() == weight.dtype()); // only use input.dtype for out.dtype
     TORCH_CHECK(input.indices().dim() == 4, "input.indices/values should be dim = 4");
     TORCH_CHECK(input.sparse_dim() == 3, "input should be channel-last layout format.");
@@ -241,24 +242,31 @@ vector<SparseTensor> sparseConv2d_forward_template_v1(
     TORCH_CHECK(stride.size() == 2, "stride must be length = 2");
     TORCH_CHECK(padding.size() == 2, "padding must be length = 2");
     // TORCH_CHECK(input.is_coalesced(), "input must be coalesced");
-    unfold_channel_last(input.indices());
-    unfold_channel_last(input.values());
+    // unfold_channel_last(input.indices()); // todo...
+    // unfold_channel_last(input.values());
     // unfolded_cols [batch, num_blocks, kernel_h, kernel_w, in_sub_channels (sparse)]
     
+    int batch_size = input._size(0);
+    int out_height = input._size(1);
+    int out_width = input._size(2);
+    int num_blocks = 0; // todo...
+
     // find max_out_channels
     auto out_channels_stats = torch::zeros({ batch_size * num_blocks }, torch::dtype(torch::kI64));
     auto out_channels_stats_ptr = data_ptr<int64_t>(out_channels_stats);
     
-    unfolded_merged [batch, num_blocks, kernel_h * kernel_w * in_sub_channels (sparse)]
-    sizes_for(unfolded_merged, true, [&]() {
-        // todo...
-    });
+    // unfolded_merged [batch, num_blocks, kernel_h * kernel_w * in_sub_channels (sparse)]
+    // sizes_for(unfolded_merged, true, [&]() {
+    //     // todo...
+    // });
 
     
 
     // create out tensor: [batch, num_block, kernel_h, kernel_w, max_out_channels(sparse)]
     auto max_out_channels = out_channels_stats.max().item<int64_t>();
-    auto out = create_sparse_IdVal_options();
+    auto out = create_sparse_IdVal_options<T>(
+        {batch_size, max_out_channels, out_height, out_width}, 
+        input.values().options());
 
     parrallel_for(batch_size * num_blocks, true, [&](auto i) {
         // find all out_channels_ids required
@@ -266,11 +274,11 @@ vector<SparseTensor> sparseConv2d_forward_template_v1(
         // todo...
         
     });
-
+    auto out_channels = max_out_channels; // tmp...
 
     return {
-        SparseTensor(out.indices, out.values, input.sparse_dim(), out_channels),
-        SparseTensor(indices_blocks, values_blocks, 1, input.range()) // id still in [0, in_channels]
+        // SparseTensor(out.indices, out.values, input.sparse_dim(), out_channels),
+        // SparseTensor(indices_blocks, values_blocks, 1, input.range()) // id still in [0, in_channels]
     };
 }
 
