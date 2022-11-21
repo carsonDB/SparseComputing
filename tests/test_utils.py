@@ -9,7 +9,7 @@ class TestUtils(unittest.TestCase):
         # more practical case
         input = SparseTensor.randn((32, 64, 128, 8, 8), 32, 2, variant_len=True)
         output1 = spCpp.sorted_merge(input.indices(), {1, 2, 3, 4}, 2)[0]
-        assert_close(output1.to_dense(), output1.to_dense()) # todo...
+        # assert_close(output1.to_dense(), output1.to_dense()) # todo...
         # check when multiple reduce axis are not contiguous
         input = SparseTensor.randn((10, 5, 4, 6, 3), 2, 2, variant_len=True)
         output1 = spCpp.sorted_merge(input.indices(), {0, 2, 4}, 2)[0].squeeze()
